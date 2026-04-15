@@ -1,0 +1,6 @@
+Run SECOP
+
+
+pip install pymupdf pandas openpyxl
+
+python generar_secop_base_datos.py "Seleccion_500_Archivos_secop_pdf.zip"
