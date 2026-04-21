@@ -29,7 +29,7 @@ except Exception:
 # CONFIGURACIÓN
 # =========================================================
 INPUT_ZIP_PATH = r""
-OUTPUT_EXCEL_PATH = r"secop_base_datos_procesos_generada.xlsx"
+OUTPUT_EXCEL_FILENAME = "secop_procedimiento_extraidos.xlsx"
 USE_AI = False
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
@@ -665,6 +665,23 @@ def prompt_zip_path(default_path: str = "") -> Path:
         return path
 
 
+def prompt_output_dir(default_dir: str = "") -> Path:
+    while True:
+        print("\nIngresa la ruta de la carpeta donde deseas guardar el Excel de salida.")
+        if default_dir:
+            print(f"Presiona Enter para usar la ruta por defecto: {default_dir}")
+        user_input = input("Ruta de salida: ").strip().strip('"')
+        selected = user_input or default_dir
+        if not selected:
+            print("Debes escribir una ruta.")
+            continue
+        out_dir = Path(selected)
+        if out_dir.exists() and not out_dir.is_dir():
+            print(f"La ruta existe, pero no es una carpeta: {out_dir}")
+            continue
+        return out_dir
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1].strip():
         zip_path = Path(sys.argv[1].strip().strip('"'))
@@ -672,9 +689,14 @@ def main():
         zip_path = prompt_zip_path(INPUT_ZIP_PATH)
 
     if len(sys.argv) >= 3 and sys.argv[2].strip():
-        output_path = Path(sys.argv[2].strip().strip('"'))
+        user_output = Path(sys.argv[2].strip().strip('"'))
+        if user_output.suffix.lower() == ".xlsx":
+            output_path = user_output
+        else:
+            output_path = user_output / OUTPUT_EXCEL_FILENAME
     else:
-        output_path = zip_path.with_name("secop_base_datos_procesos_generada.xlsx")
+        output_dir = prompt_output_dir(str(zip_path.parent))
+        output_path = output_dir / OUTPUT_EXCEL_FILENAME
 
     client = get_openai_client()
     data = process_zip(zip_path, use_ai=bool(client), client=client)
