@@ -36,6 +36,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OUTPUT_COLUMNS = [
     "archivo_pdf",
     "id_publicacion",
+    "url",
     "entidad",
     "precio_estimado_total",
     "numero_proceso",
@@ -190,6 +191,20 @@ def get_id_publicacion(filename: str) -> str:
     return m.group(1) if m else stem
 
 
+def build_url_from_id_publicacion(id_publicacion: str) -> str:
+    """
+    Regla construida a partir de la tabla ejemplo:
+    https://community.secop.gov.co/Public/Tendering/OpportunityDetail/Index?noticeUID={id_publicacion}&isFromPublicArea=True&isModal=true&asPopupView=true
+    """
+    id_publicacion = normalize_spaces(id_publicacion)
+    if not id_publicacion:
+        return ""
+    return (
+        "https://community.secop.gov.co/Public/Tendering/OpportunityDetail/Index"
+        f"?noticeUID={id_publicacion}&isFromPublicArea=True&isModal=true&asPopupView=true"
+    )
+
+
 def extract_numero_proceso(text: str, filename: str = "") -> str:
     patterns = [
         r"\b(ATENEA\s*-\s*[A-Z0-9]+\s*-\s*20\d{2}(?:\s+copia)?)\b",
@@ -287,9 +302,6 @@ def parse_procedure_fields(lines: List[str]) -> Dict[str, str]:
     if start < len(lines) and strip_accents(lines[start]).lower() == "informacion":
         start += 1
 
-    # -----------------------------------------
-    # Bloque principal: entidad / precio / proceso / título / fase / estado
-    # -----------------------------------------
     money_idx = first_index(lines, is_money_line, start)
     if money_idx != -1:
         out["entidad"] = safe_join(lines[start:money_idx])
@@ -354,20 +366,12 @@ def parse_procedure_fields(lines: List[str]) -> Dict[str, str]:
                                 out["codigo_unspsc"] = m_unspsc.group(1)
                                 out["descripcion_unspsc"] = normalize_spaces(m_unspsc.group(2))
 
-    # -----------------------------------------
-    # PAA
-    # -----------------------------------------
     paa_idx = find_line(lines, r"^Plan anual de adquisiciones$")
     if paa_idx != -1:
         yidx = first_index(lines, is_year_line, paa_idx + 1)
         if yidx != -1:
             out["paa_anio"] = lines[yidx]
 
-    # -----------------------------------------
-    # Cronograma -> fecha_publicacion_proceso
-    # Regla: normalmente es la última fecha dentro del bloque Cronograma
-    # antes de "Configuración financiera"
-    # -----------------------------------------
     cron_idx = find_line(lines, r"^Cronograma$")
     conf_idx = find_line(lines, r"^Configuración financiera$", cron_idx + 1) if cron_idx != -1 else -1
     if cron_idx != -1:
@@ -376,9 +380,6 @@ def parse_procedure_fields(lines: List[str]) -> Dict[str, str]:
         if dts:
             out["fecha_publicacion_proceso"] = dts[-1]
 
-    # -----------------------------------------
-    # Información de la selección -> adjudicataria / valor
-    # -----------------------------------------
     sel_idx = find_line(lines, r"^Información de la selección$")
     if sel_idx != -1:
         cursor = sel_idx + 1
@@ -401,16 +402,12 @@ def parse_procedure_fields(lines: List[str]) -> Dict[str, str]:
 
         out["entidad_adjudicataria"] = clean_entity_name(safe_join(adjud_lines))
 
-        # Fallback: si no encontró valor en ese cursor, búscalo en las siguientes 8 líneas
         if not out["valor_contrato"]:
             for line in lines[sel_idx: min(len(lines), sel_idx + 12)]:
                 if is_money_line(line):
                     out["valor_contrato"] = line
                     break
 
-    # -----------------------------------------
-    # Destinación del gasto
-    # -----------------------------------------
     for line in lines:
         plain = strip_accents(line).lower()
         if plain == "inversion":
@@ -531,9 +528,13 @@ def build_row_from_pdf(pdf_bytes: bytes, filename: str, client=None, use_ai: boo
     base = parse_procedure_fields(lines)
     base = fallback_extract(text, base)
 
+    id_publicacion = get_id_publicacion(filename)
+    url = build_url_from_id_publicacion(id_publicacion)
+
     row = {
         "archivo_pdf": Path(filename).name,
-        "id_publicacion": get_id_publicacion(filename),
+        "id_publicacion": id_publicacion,
+        "url": url,
         "entidad": base["entidad"],
         "precio_estimado_total": base["precio_estimado_total"],
         "numero_proceso": base["numero_proceso"] or extract_numero_proceso(text, filename),
@@ -568,6 +569,7 @@ def build_row_from_pdf(pdf_bytes: bytes, filename: str, client=None, use_ai: boo
 
     required = [
         row["id_publicacion"],
+        row["url"],
         row["entidad"],
         row["precio_estimado_total"],
         row["numero_proceso"],
@@ -578,7 +580,7 @@ def build_row_from_pdf(pdf_bytes: bytes, filename: str, client=None, use_ai: boo
         row["codigo_unspsc"],
         row["valor_contrato"],
     ]
-    row["extraccion_ok"] = sum(bool(x) for x in required) >= 8
+    row["extraccion_ok"] = sum(bool(x) for x in required) >= 9
     return row
 
 
@@ -596,10 +598,12 @@ def process_zip(zip_path: Path, use_ai: bool = False, client=None) -> List[Dict[
             try:
                 results.append(build_row_from_pdf(pdf_bytes, name, client=client, use_ai=use_ai))
             except Exception:
+                id_publicacion = get_id_publicacion(name)
                 results.append(
                     {
                         "archivo_pdf": Path(name).name,
-                        "id_publicacion": get_id_publicacion(name),
+                        "id_publicacion": id_publicacion,
+                        "url": build_url_from_id_publicacion(id_publicacion),
                         "entidad": "",
                         "precio_estimado_total": "",
                         "numero_proceso": "",
