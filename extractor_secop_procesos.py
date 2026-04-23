@@ -57,6 +57,12 @@ OUTPUT_COLUMNS = [
     "valor_contrato",
     "destinacion_gasto",
     "paa_anio",
+    "CDP_Código",
+    "CDP_Tipo",
+    "CDP_Estado",
+    "CDP_Saldo",
+    "CDP_Valor a utilizar",
+    "CDP_Código unidad/subunidad ejecutora",
     "precio_estimado_total_cop",
     "valor_contrato_cop",
     "anio_proceso",
@@ -92,6 +98,27 @@ PROCESS_TYPE_MARKERS = [
     "Concurso de meritos",
     "Subasta inversa",
 ]
+
+CDP_HEADER_LABELS = {
+    "Código",
+    "Tipo",
+    "Estado",
+    "Saldo",
+    "Valor a utilizar",
+    "Código unidad/subunidad ejecutora",
+}
+CDP_STOP_MARKERS = [
+    "Saldo de CDP",
+    "Saldo de vigencias futuras",
+    "Saldo total a comprometer",
+    "Última consulta a SIIF",
+    "Fecha de consulta SIIF",
+    "Información de la selección",
+    "Visita al lugar de ejecución",
+    "Cuestionario",
+    "Configuración financiera",
+]
+CDP_SECTION_PATTERN = r"CDP/Vigencias Futuras"
 
 
 # =========================================================
@@ -192,10 +219,6 @@ def get_id_publicacion(filename: str) -> str:
 
 
 def build_url_from_id_publicacion(id_publicacion: str) -> str:
-    """
-    Regla construida a partir de la tabla ejemplo:
-    https://community.secop.gov.co/Public/Tendering/OpportunityDetail/Index?noticeUID={id_publicacion}&isFromPublicArea=True&isModal=true&asPopupView=true
-    """
     id_publicacion = normalize_spaces(id_publicacion)
     if not id_publicacion:
         return ""
@@ -226,6 +249,90 @@ def extract_anio_proceso(numero_proceso: str, fecha_publicacion: str) -> Optiona
     if m:
         return int(m.group(1))
     return None
+
+
+def is_cdp_stop_line(line: str) -> bool:
+    plain = normalize_spaces(strip_accents(line)).lower()
+    for marker in CDP_STOP_MARKERS:
+        if plain.startswith(normalize_spaces(strip_accents(marker)).lower()):
+            return True
+    return False
+
+
+def parse_cdp_fields(lines: List[str], text: str) -> Dict[str, str]:
+    """
+    Extrae la primera fila de la tabla ubicada en la sección 'CDP/Vigencias Futuras'.
+
+    Regla observada en los PDFs de muestra:
+    - después del título de la sección, aparecen los 6 valores de la fila en este orden:
+      Código, Tipo, Estado, Saldo, Valor a utilizar, Código unidad/subunidad ejecutora
+    - más adelante vuelven a aparecer los encabezados de la tabla
+    - la sección termina antes de marcadores como 'Saldo de CDP', 'Información de la selección', etc.
+    """
+    out = {
+        "CDP_Código": "",
+        "CDP_Tipo": "",
+        "CDP_Estado": "",
+        "CDP_Saldo": "",
+        "CDP_Valor a utilizar": "",
+        "CDP_Código unidad/subunidad ejecutora": "",
+    }
+
+    idx = find_line(lines, CDP_SECTION_PATTERN)
+    if idx == -1:
+        return out
+
+    values = []
+    i = idx + 1
+    while i < len(lines):
+        line = normalize_spaces(lines[i])
+        if not line:
+            i += 1
+            continue
+
+        if is_cdp_stop_line(line):
+            break
+
+        if line in CDP_HEADER_LABELS:
+            i += 1
+            continue
+
+        values.append(line)
+        if len(values) >= 6:
+            break
+        i += 1
+
+    if len(values) >= 6:
+        out["CDP_Código"] = values[0]
+        out["CDP_Tipo"] = values[1]
+        out["CDP_Estado"] = values[2]
+        out["CDP_Saldo"] = values[3]
+        out["CDP_Valor a utilizar"] = values[4]
+        out["CDP_Código unidad/subunidad ejecutora"] = values[5]
+        return out
+
+    # Fallback por regex sobre texto completo si la lectura por líneas no alcanza
+    pattern = re.compile(
+        r"CDP/Vigencias Futuras.*?\n"
+        r"([^\n]+)\n"
+        r"([^\n]+)\n"
+        r"([^\n]+)\n"
+        r"([^\n]+COP)\n"
+        r"([^\n]+COP)\n"
+        r"([^\n]+?)\n"
+        r"(?:Saldo de CDP|Saldo de vigencias futuras|Información de la selección)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    if m:
+        out["CDP_Código"] = normalize_spaces(m.group(1))
+        out["CDP_Tipo"] = normalize_spaces(m.group(2))
+        out["CDP_Estado"] = normalize_spaces(m.group(3))
+        out["CDP_Saldo"] = normalize_spaces(m.group(4))
+        out["CDP_Valor a utilizar"] = normalize_spaces(m.group(5))
+        out["CDP_Código unidad/subunidad ejecutora"] = normalize_spaces(m.group(6))
+
+    return out
 
 
 # =========================================================
@@ -527,6 +634,7 @@ def build_row_from_pdf(pdf_bytes: bytes, filename: str, client=None, use_ai: boo
 
     base = parse_procedure_fields(lines)
     base = fallback_extract(text, base)
+    cdp = parse_cdp_fields(lines, text)
 
     id_publicacion = get_id_publicacion(filename)
     url = build_url_from_id_publicacion(id_publicacion)
@@ -555,6 +663,12 @@ def build_row_from_pdf(pdf_bytes: bytes, filename: str, client=None, use_ai: boo
         "valor_contrato": base["valor_contrato"],
         "destinacion_gasto": base["destinacion_gasto"],
         "paa_anio": int(base["paa_anio"]) if str(base["paa_anio"]).isdigit() else None,
+        "CDP_Código": cdp["CDP_Código"],
+        "CDP_Tipo": cdp["CDP_Tipo"],
+        "CDP_Estado": cdp["CDP_Estado"],
+        "CDP_Saldo": cdp["CDP_Saldo"],
+        "CDP_Valor a utilizar": cdp["CDP_Valor a utilizar"],
+        "CDP_Código unidad/subunidad ejecutora": cdp["CDP_Código unidad/subunidad ejecutora"],
         "precio_estimado_total_cop": parse_money(base["precio_estimado_total"]),
         "valor_contrato_cop": parse_money(base["valor_contrato"]),
         "anio_proceso": None,
@@ -624,6 +738,12 @@ def process_zip(zip_path: Path, use_ai: bool = False, client=None) -> List[Dict[
                         "valor_contrato": "",
                         "destinacion_gasto": "",
                         "paa_anio": None,
+                        "CDP_Código": "",
+                        "CDP_Tipo": "",
+                        "CDP_Estado": "",
+                        "CDP_Saldo": "",
+                        "CDP_Valor a utilizar": "",
+                        "CDP_Código unidad/subunidad ejecutora": "",
                         "precio_estimado_total_cop": None,
                         "valor_contrato_cop": None,
                         "anio_proceso": None,
